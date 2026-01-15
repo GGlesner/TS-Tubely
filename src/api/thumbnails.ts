@@ -4,6 +4,7 @@ import { createVideo, getVideo, updateVideo } from "../db/videos";
 import type { ApiConfig } from "../config";
 import type { BunRequest } from "bun";
 import { BadRequestError, NotFoundError, UserForbiddenError } from "./errors";
+import path from "path";
 
 type Thumbnail = {
   data: ArrayBuffer;
@@ -60,7 +61,14 @@ export async function handlerUploadThumbnail(cfg: ApiConfig, req: BunRequest) {
     throw new BadRequestError("Thumbnail file is too big: max size is 10MB");
   }
 
-  const mediaType = file.type;
+  const mediaType: Array<string> = file.type.split("/");
+  if (
+    mediaType.length != 2 ||
+    mediaType[0] != "image" ||
+    !["jpeg", "png"].includes(mediaType[1])
+  ) {
+    throw new BadRequestError("Invalid Mime type");
+  }
   const data = await file.arrayBuffer();
   const video = getVideo(cfg.db, videoId);
 
@@ -70,13 +78,10 @@ export async function handlerUploadThumbnail(cfg: ApiConfig, req: BunRequest) {
   if (video.userID != userID) {
     throw new UserForbiddenError("You are not the owner of this video");
   }
-
-  // let thumbnailURL = `http://localhost:${cfg.port}/api/thumbnails/${videoId}`;
-  // video.thumbnailURL = thumbnailURL;
-  // videoThumbnails.set(videoId, { data, mediaType });
-
-  const buff = Buffer.from(data).toString("base64");
-  const thumbnailURL = `data:${mediaType};base64,${buff}`;
+  const extension: string = mediaType[1];
+  const videoURL: string = path.join(cfg.assetsRoot, `${videoId}.${extension}`);
+  Bun.write(videoURL, data);
+  const thumbnailURL: string = `http://localhost:${cfg.port}/${videoURL}`;
   video.thumbnailURL = thumbnailURL;
 
   updateVideo(cfg.db, video);
