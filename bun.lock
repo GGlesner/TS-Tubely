@@ -3,7 +3,7 @@
   "configVersion": 0,
   "workspaces": {
     "": {
-      "name": "complete",
+      "name": "tubely",
       "dependencies": {
         "jsonwebtoken": "^9.0.2",
       },
