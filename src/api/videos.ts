@@ -7,6 +7,7 @@ import { getBearerToken, validateJWT } from "../auth";
 import { getVideo, updateVideo } from "../db/videos";
 import path from "path";
 import { randomBytes } from "crypto";
+import { cwd } from "process";
 
 export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   const { videoId } = req.params as { videoId?: string };
@@ -32,9 +33,9 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
 
   const mediaType: Array<string> = file.type.split("/");
   if (
-    mediaType.length != 2 ||
-    mediaType[0] != "video" ||
-    mediaType[1] != "mp4"
+    mediaType.length !== 2 ||
+    mediaType[0] !== "video" ||
+    mediaType[1] !== "mp4"
   ) {
     throw new BadRequestError("Invalid Mime type");
   }
@@ -48,19 +49,84 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
 
   const extension: string = mediaType[1];
   const fileName: string = randomBytes(32).toString("base64url");
-  const videoURL: string = `${fileName}.${extension}`;
-  video.videoURL = path.join(cfg.assetsRoot, videoURL);
+  const videoFile: string = `${fileName}.${extension}`;
+  const inputVideoPath: string = path.join(cfg.assetsRoot, videoFile);
+  video.videoURL = inputVideoPath;
 
   const data = await file.arrayBuffer();
-  await Bun.write(videoURL, data);
+  await Bun.write(inputVideoPath, data);
 
-  const bunFile = Bun.file(videoURL);
-  const s3File = cfg.s3Client.file(videoURL);
+  const aspectRatio = await getVideoAspectRatio(inputVideoPath);
+  const videoKey = `${aspectRatio}/${videoFile}`;
+
+  const outputVideoPath = await processVideoForFastStart(inputVideoPath);
+  await Bun.file(inputVideoPath).delete();
+  const bunFile = Bun.file(outputVideoPath);
+  const s3File = cfg.s3Client.file(videoKey);
   await s3File.write(bunFile, { type: "video/mp4" });
+  await bunFile.delete();
 
-  video.videoURL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${videoURL}`;
+  video.videoURL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${videoKey}`;
   updateVideo(cfg.db, video);
 
-  await bunFile.delete();
   return respondWithJSON(200, video);
+}
+
+async function getVideoAspectRatio(filePath: string) {
+  const subProcess = Bun.spawn({
+    cmd: [
+      "ffprobe",
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_entries",
+      "stream=width,height",
+      "-of",
+      "json",
+      filePath,
+    ],
+  });
+  const stdout = await new Response(subProcess.stdout).text();
+  const stderr = await new Response(subProcess.stderr).text();
+  if (subProcess.exitCode === 0) {
+    throw new Error(`error during cmd:${stderr}`);
+  }
+  const output = JSON.parse(stdout);
+  if (!Array.isArray(output.streams) || output.streams.length !== 1) {
+    throw new Error(`error in cmd result: could not retrieve width,height`);
+  }
+  const dims = output.streams[0] as {
+    width: number;
+    height: number;
+  };
+  const ratio = dims.width / dims.height;
+  if (Math.abs(16 / 9 - ratio) < 0.1) {
+    return "landscape";
+  } else if (Math.abs(9 / 16 - ratio) < 0.1) {
+    return "portrait";
+  } else {
+    return "other";
+  }
+}
+
+async function processVideoForFastStart(inputFilePath: string) {
+  const outputFilePath = inputFilePath + ".processed";
+  Bun.spawn({
+    cmd: [
+      "ffmpeg",
+      "-i",
+      inputFilePath,
+      "-movflags",
+      "faststart",
+      "-map_metadata",
+      "0",
+      "-codec",
+      "copy",
+      "-f",
+      "mp4",
+      outputFilePath,
+    ],
+  });
+  return outputFilePath;
 }
